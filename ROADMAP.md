@@ -17,4 +17,4 @@ Cible d'acceptation : index et SAM **octet-identiques** au binaire `bwa-mem2` 2.
 | 9 | `phase9-gpu` | backend Metal du SW (entier -> bit-identique) | identique au scalaire + speedup |
 | 10+ | | gate GIAB `hap.py`/`vcfeval` ; packaging | |
 
-Statut : **phase 0 terminee** (gate PASS : `@SQ` octet-identique, 5000/5000 reads apparies, harnais operationnel). Prochaine : phase 1 (indexeur).
+Statut : **phase 1 terminee** (index octet-identique tiny + 2Mb via notre SA-IS). Prochaine : phase 2 (chargement + traversee FM-index).
