@@ -1,0 +1,14 @@
+# Rust build output
+/target
+
+# Reference clones (study material, gitignored; recreated by scripts/setup_reference.sh)
+/reference/
+
+# Transient working dirs: all derived indexes, generated FASTQ/FASTA, oracle/ours SAMs,
+# time/RSS logs and concordance reports live here so they are never committed.
+/work/
+/scratch/
+
+# Committed fixtures live under testdata/ and crates/*/tests/golden/ and are NOT ignored.
+
+.DS_Store
