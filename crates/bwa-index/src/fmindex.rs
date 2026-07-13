@@ -225,6 +225,18 @@ impl FmIndex {
         self.reference[pos as usize]
     }
 
+    /// The loaded cumulative base counts (already `+1`, as bwa-mem2's `load_index`).
+    #[inline]
+    pub fn counts(&self) -> [i64; 5] {
+        self.count
+    }
+
+    /// The `.0123` binary reference (forward ++ reverse-complement, 2L bytes).
+    #[inline]
+    pub fn reference(&self) -> &[u8] {
+        &self.reference
+    }
+
     /// Length of the forward reference `L` (`ref_seq_len` is `2L + 1`).
     #[inline]
     pub fn l_pac(&self) -> i64 {

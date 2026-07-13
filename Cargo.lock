@@ -137,6 +137,10 @@ version = "0.0.0"
 [[package]]
 name = "bwa-seed"
 version = "0.0.0"
+dependencies = [
+ "bwa-core",
+ "bwa-index",
+]
 
 [[package]]
 name = "bytecount"
