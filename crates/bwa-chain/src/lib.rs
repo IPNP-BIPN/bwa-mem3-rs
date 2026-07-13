@@ -207,7 +207,7 @@ pub fn mem_chain_flt(opt: &MemOpt, chains: Vec<MemChain>) -> Vec<MemChain> {
     }
 
     // Sort by weight descending (`flt_lt`).
-    a.sort_by(|x, y| y.w.cmp(&x.w));
+    a.sort_by_key(|c| std::cmp::Reverse(c.w));
 
     a[0].kept = 3;
     let mut kept_idx: Vec<usize> = vec![0];
