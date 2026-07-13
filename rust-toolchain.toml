@@ -1,0 +1,6 @@
+# Documentaire. On developpe avec le cargo/rustc Homebrew (1.96.1), premier sur le PATH, qui
+# n'interprete PAS ce fichier (ce n'est pas un toolchain rustup) et qui EST deja 1.96.1. Un CI
+# base rustup l'honore apres `rustup toolchain install 1.96.1`. Voir le plan (skew Homebrew vs rustup).
+[toolchain]
+channel = "1.96.1"
+components = ["clippy", "rustfmt"]

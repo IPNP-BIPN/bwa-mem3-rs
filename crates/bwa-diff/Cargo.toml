@@ -1,0 +1,16 @@
+[package]
+name = "bwa-diff"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "sam-diff"
+path = "src/bin/sam_diff.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
