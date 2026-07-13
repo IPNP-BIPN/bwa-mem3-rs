@@ -1,7 +1,11 @@
 //! Seed extension via banded Smith-Waterman.
 //!
-//! Phase 0 defines only the backend trait; the scalar implementation (the bit-identity source of
-//! truth, mirroring the patched `bandedSWA.cpp`) lands in phase 5, with NEON/Metal backends later.
+//! The scalar seed-extension kernel (`sw::ksw_extend2`) is the bit-identity source of truth;
+//! NEON/Metal backends must reproduce its integer results.
+
+pub mod sw;
+
+pub use sw::{ksw_extend2, ExtendResult};
 
 /// A batched banded Smith-Waterman backend.
 ///

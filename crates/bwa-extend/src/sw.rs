@@ -1,0 +1,330 @@
+//! Scalar banded Smith-Waterman seed extension, a faithful port of bwa's `ksw_extend2`
+//! (`reference/bwa-mem2/src/ksw.cpp`): local extension from an initial score `h0` with affine
+//! gaps, a band `w`, and z-drop early termination. This is the bit-identity source of truth for
+//! seed extension; SIMD/GPU backends must reproduce its integer results.
+
+/// Result of a seed extension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExtendResult {
+    /// Best local score (the return value of `ksw_extend2`).
+    pub score: i32,
+    /// Query length of the best local alignment (`max_j + 1`).
+    pub qle: i32,
+    /// Target length of the best local alignment (`max_i + 1`).
+    pub tle: i32,
+    /// Target length when the alignment reaches the query end (`max_ie + 1`).
+    pub gtle: i32,
+    /// Score when the alignment reaches the query end.
+    pub gscore: i32,
+    /// Maximum band offset observed.
+    pub max_off: i32,
+}
+
+/// Extend `query` against `target` from initial score `h0`. `m` is the alphabet size and `mat` the
+/// `m*m` scoring matrix (row-major, `mat[a*m + b]`). Faithful port of `ksw_extend2`.
+#[allow(clippy::too_many_arguments)]
+pub fn ksw_extend2(
+    query: &[u8],
+    target: &[u8],
+    m: usize,
+    mat: &[i8],
+    o_del: i32,
+    e_del: i32,
+    o_ins: i32,
+    e_ins: i32,
+    w: i32,
+    end_bonus: i32,
+    zdrop: i32,
+    h0: i32,
+) -> ExtendResult {
+    let qlen = query.len();
+    let tlen = target.len();
+    debug_assert!(h0 > 0);
+    let oe_del = o_del + e_del;
+    let oe_ins = o_ins + e_ins;
+
+    // Query profile: qp[c*qlen + j] = score of target base c against query base j.
+    let mut qp = vec![0i8; qlen * m];
+    let mut idx = 0;
+    for k in 0..m {
+        let row = &mat[k * m..k * m + m];
+        for &qb in query {
+            qp[idx] = row[qb as usize];
+            idx += 1;
+        }
+    }
+
+    // Score arrays: eh_h = H, eh_e = E.
+    let mut eh_h = vec![0i32; qlen + 1];
+    let mut eh_e = vec![0i32; qlen + 1];
+    eh_h[0] = h0;
+    eh_h[1] = if h0 > oe_ins { h0 - oe_ins } else { 0 };
+    {
+        let mut j = 2;
+        while j <= qlen && eh_h[j - 1] > e_ins {
+            eh_h[j] = eh_h[j - 1] - e_ins;
+            j += 1;
+        }
+    }
+
+    // Adjust the band by the maximum feasible insertion/deletion.
+    let max_sc = mat[..m * m].iter().copied().max().unwrap_or(0) as i32;
+    let mut w = w;
+    let max_ins = (((qlen as f64 * f64::from(max_sc) + f64::from(end_bonus) - f64::from(o_ins))
+        / f64::from(e_ins))
+        + 1.0) as i32;
+    let max_ins = max_ins.max(1);
+    w = w.min(max_ins);
+    let max_del = (((qlen as f64 * f64::from(max_sc) + f64::from(end_bonus) - f64::from(o_del))
+        / f64::from(e_del))
+        + 1.0) as i32;
+    let max_del = max_del.max(1);
+    w = w.min(max_del);
+
+    let mut max = h0;
+    let mut max_i = -1i32;
+    let mut max_j = -1i32;
+    let mut max_ie = -1i32;
+    let mut gscore = -1i32;
+    let mut max_off = 0i32;
+    let mut beg = 0i32;
+    let mut end = qlen as i32;
+
+    for i in 0..tlen as i32 {
+        let mut f = 0i32;
+        let mut row_max = 0i32;
+        let mut mj = -1i32;
+        let tc = target[i as usize] as usize;
+        let q = &qp[tc * qlen..tc * qlen + qlen];
+
+        if beg < i - w {
+            beg = i - w;
+        }
+        if end > i + w + 1 {
+            end = i + w + 1;
+        }
+        if end > qlen as i32 {
+            end = qlen as i32;
+        }
+        let mut h1 = if beg == 0 {
+            let v = h0 - (o_del + e_del * (i + 1));
+            v.max(0)
+        } else {
+            0
+        };
+
+        let mut j = beg;
+        while j < end {
+            let ju = j as usize;
+            let big_m = eh_h[ju]; // H(i-1, j-1)
+            let mut e = eh_e[ju]; // E(i-1, j)
+            eh_h[ju] = h1; // H(i, j-1) for next row
+            let big_m = if big_m != 0 {
+                big_m + i32::from(q[ju])
+            } else {
+                0
+            };
+            let mut h = if big_m > e { big_m } else { e };
+            h = if h > f { h } else { f };
+            h1 = h;
+            mj = if row_max > h { mj } else { j };
+            row_max = if row_max > h { row_max } else { h };
+            let mut t = big_m - oe_del;
+            t = t.max(0);
+            e -= e_del;
+            e = if e > t { e } else { t };
+            eh_e[ju] = e;
+            let mut t = big_m - oe_ins;
+            t = t.max(0);
+            f -= e_ins;
+            f = if f > t { f } else { t };
+            j += 1;
+        }
+        eh_h[end as usize] = h1;
+        eh_e[end as usize] = 0;
+        if j == qlen as i32 && gscore <= h1 {
+            max_ie = i;
+            gscore = h1;
+        }
+        if row_max == 0 {
+            break;
+        }
+        if row_max > max {
+            max = row_max;
+            max_i = i;
+            max_j = mj;
+            let off = (mj - i).abs();
+            if off > max_off {
+                max_off = off;
+            }
+        } else if zdrop > 0 {
+            if i - max_i > mj - max_j {
+                if max - row_max - ((i - max_i) - (mj - max_j)) * e_del > zdrop {
+                    break;
+                }
+            } else if max - row_max - ((mj - max_j) - (i - max_i)) * e_ins > zdrop {
+                break;
+            }
+        }
+
+        // Shrink the band around the still-live cells.
+        let mut jb = beg;
+        while jb < end && eh_h[jb as usize] == 0 && eh_e[jb as usize] == 0 {
+            jb += 1;
+        }
+        beg = jb;
+        let mut je = end;
+        while je >= beg && eh_h[je as usize] == 0 && eh_e[je as usize] == 0 {
+            je -= 1;
+        }
+        end = if je + 2 < qlen as i32 {
+            je + 2
+        } else {
+            qlen as i32
+        };
+    }
+
+    ExtendResult {
+        score: max,
+        qle: max_j + 1,
+        tle: max_i + 1,
+        gtle: max_ie + 1,
+        gscore,
+        max_off,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 5x5 matrix like bwa: match a, mismatch -b, N row/col -1.
+    fn scmat(a: i8, b: i8) -> Vec<i8> {
+        let mut mat = vec![0i8; 25];
+        let mut k = 0;
+        for i in 0..4 {
+            for j in 0..4 {
+                mat[k] = if i == j { a } else { -b };
+                k += 1;
+            }
+            mat[k] = -1;
+            k += 1;
+        }
+        for _ in 0..5 {
+            mat[k] = -1;
+            k += 1;
+        }
+        mat
+    }
+
+    /// Unbanded reference of the same recurrence (no band, no zdrop, no zero-row break), for
+    /// validating the core DP where those heuristics don't fire.
+    #[allow(clippy::too_many_arguments)]
+    fn ref_extend(
+        query: &[u8],
+        target: &[u8],
+        m: usize,
+        mat: &[i8],
+        o_del: i32,
+        e_del: i32,
+        o_ins: i32,
+        e_ins: i32,
+        h0: i32,
+    ) -> i32 {
+        let qlen = query.len();
+        let tlen = target.len();
+        let oe_del = o_del + e_del;
+        let oe_ins = o_ins + e_ins;
+        let mut eh_h = vec![0i32; qlen + 1];
+        let mut eh_e = vec![0i32; qlen + 1];
+        eh_h[0] = h0;
+        eh_h[1] = if h0 > oe_ins { h0 - oe_ins } else { 0 };
+        let mut j = 2;
+        while j <= qlen && eh_h[j - 1] > e_ins {
+            eh_h[j] = eh_h[j - 1] - e_ins;
+            j += 1;
+        }
+        let mut max = h0;
+        for i in 0..tlen {
+            let mut f = 0i32;
+            let mut h1 = (h0 - (o_del + e_del * (i as i32 + 1))).max(0);
+            for j in 0..qlen {
+                let sc = i32::from(mat[target[i] as usize * m + query[j] as usize]);
+                let big_m = eh_h[j];
+                let mut e = eh_e[j];
+                eh_h[j] = h1;
+                let big_m = if big_m != 0 { big_m + sc } else { 0 };
+                let mut h = big_m.max(e).max(f);
+                h1 = h;
+                if h > max {
+                    max = h;
+                }
+                let t = (big_m - oe_del).max(0);
+                e = (e - e_del).max(t);
+                eh_e[j] = e;
+                let t = (big_m - oe_ins).max(0);
+                f = (f - e_ins).max(t);
+                let _ = &mut h;
+            }
+            eh_h[qlen] = h1;
+            eh_e[qlen] = 0;
+        }
+        max
+    }
+
+    fn call(query: &[u8], target: &[u8], mat: &[i8], h0: i32) -> ExtendResult {
+        ksw_extend2(query, target, 5, mat, 6, 1, 6, 1, 100, 0, 100, h0)
+    }
+
+    #[test]
+    fn exact_match_scores_full_length() {
+        let mat = scmat(1, 4);
+        let s: Vec<u8> = vec![0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3];
+        let r = call(&s, &s, &mat, 1);
+        // h0 + qlen matches of score 1.
+        assert_eq!(r.score, 1 + s.len() as i32);
+        assert_eq!(r.qle, s.len() as i32);
+        assert_eq!(r.tle, s.len() as i32);
+        assert_eq!(r.gscore, 1 + s.len() as i32);
+    }
+
+    #[test]
+    fn matches_unbanded_reference() {
+        let mat = scmat(1, 4);
+        let mut state: u64 = 0xa5a5_1234_9999_0001;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..500 {
+            // Build a target that shares a positive-scoring prefix with the query so the local
+            // extension never hits a zero row (keeping band/zdrop inactive for the comparison).
+            let len = 20 + (next() % 40) as usize;
+            let base: Vec<u8> = (0..len).map(|_| (next() % 4) as u8).collect();
+            let mut target = base.clone();
+            // introduce a couple of mismatches late, staying positive
+            if len > 25 {
+                let p = len - 3 - (next() % 3) as usize;
+                target[p] = (target[p] + 1) % 4;
+            }
+            let got = ksw_extend2(&base, &target, 5, &mat, 6, 1, 6, 1, 1000, 0, 1_000_000, 1);
+            let want = ref_extend(&base, &target, 5, &mat, 6, 1, 6, 1, 1);
+            assert_eq!(got.score, want, "len={len}");
+        }
+    }
+
+    #[test]
+    fn zdrop_stops_runaway_extension() {
+        let mat = scmat(1, 4);
+        // A short match then a long mismatched tail: zdrop caps the target length used.
+        let mut query = vec![0u8; 10];
+        query.extend(vec![1u8; 40]);
+        let mut target = vec![0u8; 10];
+        target.extend(vec![2u8; 40]); // tail all mismatched vs query tail
+        let r = ksw_extend2(&query, &target, 5, &mat, 6, 1, 6, 1, 100, 0, 100, 1);
+        assert_eq!(r.score, 1 + 10); // only the 10 matching bases contribute
+        assert_eq!(r.tle, 10);
+    }
+}
