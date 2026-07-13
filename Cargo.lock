@@ -76,6 +76,11 @@ dependencies = [
 [[package]]
 name = "bwa-chain"
 version = "0.0.0"
+dependencies = [
+ "bwa-core",
+ "bwa-index",
+ "bwa-seed",
+]
 
 [[package]]
 name = "bwa-cli"

@@ -48,6 +48,60 @@ impl BntSeq {
         parse_amb(&amb, &mut s)?;
         Ok(s)
     }
+
+    /// Map a 2L-space position to `(forward_pos, is_rev)`, mirroring `bns_depos`.
+    #[inline]
+    pub fn depos(&self, pos: i64) -> (i64, bool) {
+        if pos >= self.l_pac {
+            ((self.l_pac << 1) - 1 - pos, true)
+        } else {
+            (pos, false)
+        }
+    }
+
+    /// Contig index containing forward position `pos_f`, or -1, mirroring `bns_pos2rid`.
+    pub fn pos2rid(&self, pos_f: i64) -> i32 {
+        if pos_f >= self.l_pac {
+            return -1;
+        }
+        let mut left = 0i32;
+        let mut mid = 0i32;
+        let mut right = self.n_seqs;
+        while left < right {
+            mid = (left + right) >> 1;
+            if pos_f >= self.contigs[mid as usize].offset {
+                if mid == self.n_seqs - 1 {
+                    break;
+                }
+                if pos_f < self.contigs[(mid + 1) as usize].offset {
+                    break;
+                }
+                left = mid + 1;
+            } else {
+                right = mid;
+            }
+        }
+        mid
+    }
+
+    /// Contig index for the interval `[rb, re)` in 2L space, or a negative code if it bridges a
+    /// contig boundary (-1) or the forward/reverse midpoint (-2). Mirrors `bns_intv2rid`.
+    pub fn intv2rid(&self, rb: i64, re: i64) -> i32 {
+        if rb < self.l_pac && re > self.l_pac {
+            return -2;
+        }
+        let rid_b = self.pos2rid(self.depos(rb).0);
+        let rid_e = if rb < re {
+            self.pos2rid(self.depos(re - 1).0)
+        } else {
+            rid_b
+        };
+        if rid_b == rid_e {
+            rid_b
+        } else {
+            -1
+        }
+    }
 }
 
 fn sibling(prefix: &Path, ext: &str) -> PathBuf {
