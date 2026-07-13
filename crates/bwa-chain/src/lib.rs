@@ -1,1 +1,326 @@
-//! Seed chaining and chain filtering (phase 4). Placeholder crate.
+//! Seed chaining and chain filtering, mirroring bwa-mem2's `mem_chain` / `test_and_merge` /
+//! `mem_chain_weight` / `mem_chain_flt` (`reference/bwa-mem2/src/bwamem.cpp`).
+//!
+//! Chains collinear seeds into candidate alignments, then filters by weight and overlap. The
+//! end-to-end byte-identity gate is the SE SAM concordance in phase 6.
+
+use std::collections::BTreeMap;
+
+use bwa_core::MemOpt;
+use bwa_index::{BntSeq, FmIndex};
+use bwa_seed::{collect_smems, MemSeed};
+
+/// A chain of collinear seeds (bwa-mem2's `mem_chain_t`).
+#[derive(Debug, Clone)]
+pub struct MemChain {
+    pub seqid: i32,
+    pub rid: i32,
+    pub pos: i64,
+    pub w: i32,
+    pub kept: u8,
+    pub is_alt: bool,
+    pub first: i32,
+    pub frac_rep: f32,
+    pub seeds: Vec<MemSeed>,
+}
+
+#[inline]
+fn chn_beg(c: &MemChain) -> i32 {
+    c.seeds[0].qbeg
+}
+#[inline]
+fn chn_end(c: &MemChain) -> i32 {
+    let last = c.seeds.last().unwrap();
+    last.qbeg + last.len
+}
+
+/// Try to absorb seed `p` (on contig `seed_rid`) into chain `c`; returns whether it was
+/// merged/contained. Faithful port of `test_and_merge`.
+fn test_and_merge(opt: &MemOpt, l_pac: i64, c: &mut MemChain, p: &MemSeed, seed_rid: i32) -> bool {
+    let last = *c.seeds.last().unwrap();
+    let qend = last.qbeg + last.len;
+    let rend = last.rbeg + i64::from(last.len);
+
+    if seed_rid != c.rid {
+        return false;
+    }
+    if p.qbeg >= c.seeds[0].qbeg
+        && p.qbeg + p.len <= qend
+        && p.rbeg >= c.seeds[0].rbeg
+        && p.rbeg + i64::from(p.len) <= rend
+    {
+        return true; // contained
+    }
+    if (last.rbeg < l_pac || c.seeds[0].rbeg < l_pac) && p.rbeg >= l_pac {
+        return false; // different strand
+    }
+    let x = i64::from(p.qbeg - last.qbeg);
+    let y = p.rbeg - last.rbeg;
+    if y >= 0
+        && x - y <= i64::from(opt.w)
+        && y - x <= i64::from(opt.w)
+        && x - i64::from(last.len) < i64::from(opt.max_chain_gap)
+        && y - i64::from(last.len) < i64::from(opt.max_chain_gap)
+    {
+        c.seeds.push(*p);
+        return true;
+    }
+    false
+}
+
+/// Chain weight = min of non-overlapping query and reference coverage. Port of `mem_chain_weight`.
+pub fn mem_chain_weight(c: &MemChain) -> i32 {
+    let mut w = 0i64;
+    let mut end = 0i64;
+    for s in &c.seeds {
+        let (b, len) = (i64::from(s.qbeg), i64::from(s.len));
+        if b >= end {
+            w += len;
+        } else if b + len > end {
+            w += b + len - end;
+        }
+        end = end.max(b + len);
+    }
+    let tmp = w;
+    w = 0;
+    end = 0;
+    for s in &c.seeds {
+        let (b, len) = (s.rbeg, i64::from(s.len));
+        if b >= end {
+            w += len;
+        } else if b + len > end {
+            w += b + len - end;
+        }
+        end = end.max(b + len);
+    }
+    w = w.min(tmp);
+    if w < (1 << 30) {
+        w as i32
+    } else {
+        (1 << 30) - 1
+    }
+}
+
+/// Build seed chains for a single read (2-bit codes) with the given `seqid`. Port of `mem_chain`
+/// (round-1 seeds only for now; the btree "closest lower chain" is a `BTreeMap` keyed by position).
+pub fn build_chains(
+    fm: &FmIndex,
+    bns: &BntSeq,
+    opt: &MemOpt,
+    codes: &[u8],
+    seqid: i32,
+) -> Vec<MemChain> {
+    let mut smems = collect_smems(fm, codes, opt.min_seed_len, 1);
+    // Intra-read SMEM order: by (m, n) ascending (bwa's `intv_lt1`).
+    smems.sort_by_key(|s| (u64::from(s.m) << 32) | u64::from(s.n));
+
+    // Repetitive length -> frac_rep.
+    let mut l_rep = 0i64;
+    let (mut b, mut e) = (0i64, 0i64);
+    for p in &smems {
+        if p.s <= i64::from(opt.max_occ) {
+            continue;
+        }
+        let (sb, se) = (i64::from(p.m), i64::from(p.n) + 1);
+        if sb > e {
+            l_rep += e - b;
+            b = sb;
+            e = se;
+        } else {
+            e = e.max(se);
+        }
+    }
+    l_rep += e - b;
+
+    let l_pac = bns.l_pac;
+    let max_occ = i64::from(opt.max_occ);
+    let mut chains: Vec<MemChain> = Vec::new();
+    let mut tree: BTreeMap<i64, usize> = BTreeMap::new();
+
+    for p in &smems {
+        let slen = (p.n + 1 - p.m) as i32;
+        let step = if p.s > max_occ { p.s / max_occ } else { 1 };
+        let mut k = 0i64;
+        let mut count = 0i64;
+        while k < p.s && count < max_occ {
+            let rbeg = fm.get_sa(p.k + k);
+            k += step;
+            count += 1;
+            let s = MemSeed {
+                rbeg,
+                qbeg: p.m as i32,
+                len: slen,
+                score: slen,
+            };
+            let rid = bns.intv2rid(rbeg, rbeg + i64::from(slen));
+            if rid < 0 {
+                continue;
+            }
+            let mut to_add = true;
+            if let Some((_, &ci)) = tree.range(..=rbeg).next_back() {
+                if test_and_merge(opt, l_pac, &mut chains[ci], &s, rid) {
+                    to_add = false;
+                }
+            }
+            if to_add {
+                let idx = chains.len();
+                chains.push(MemChain {
+                    seqid,
+                    rid,
+                    pos: rbeg,
+                    w: 0,
+                    kept: 0,
+                    is_alt: false,
+                    first: -1,
+                    frac_rep: 0.0,
+                    seeds: vec![s],
+                });
+                tree.insert(rbeg, idx);
+            }
+        }
+    }
+
+    let frac = l_rep as f32 / codes.len() as f32;
+    for c in &mut chains {
+        c.frac_rep = frac;
+    }
+    chains
+}
+
+/// Filter chains for a single read: drop light chains, then prune overlapping ones. Port of
+/// `mem_chain_flt` (single-read group).
+pub fn mem_chain_flt(opt: &MemOpt, chains: Vec<MemChain>) -> Vec<MemChain> {
+    if chains.is_empty() {
+        return chains;
+    }
+    let mut a: Vec<MemChain> = Vec::new();
+    for mut c in chains {
+        c.first = -1;
+        c.kept = 0;
+        c.w = mem_chain_weight(&c);
+        if c.w >= opt.min_chain_weight {
+            a.push(c);
+        }
+    }
+    if a.is_empty() {
+        return a;
+    }
+
+    // Sort by weight descending (`flt_lt`).
+    a.sort_by(|x, y| y.w.cmp(&x.w));
+
+    a[0].kept = 3;
+    let mut kept_idx: Vec<usize> = vec![0];
+    for i in 1..a.len() {
+        let (ib, ie, iw, ialt) = (chn_beg(&a[i]), chn_end(&a[i]), a[i].w, a[i].is_alt);
+        let mut large_ovlp = false;
+        let mut broke = false;
+        for &j in &kept_idx {
+            let (jb, je, jw, jalt) = (chn_beg(&a[j]), chn_end(&a[j]), a[j].w, a[j].is_alt);
+            let b_max = jb.max(ib);
+            let e_min = je.min(ie);
+            if e_min > b_max && (!jalt || ialt) {
+                let li = ie - ib;
+                let lj = je - jb;
+                let min_l = li.min(lj);
+                if (e_min - b_max) as f32 >= min_l as f32 * opt.mask_level
+                    && min_l < opt.max_chain_gap
+                {
+                    large_ovlp = true;
+                    if a[j].first < 0 {
+                        a[j].first = i as i32;
+                    }
+                    if (iw as f32) < jw as f32 * opt.drop_ratio && jw - iw >= opt.min_seed_len << 1
+                    {
+                        broke = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if !broke {
+            kept_idx.push(i);
+            a[i].kept = if large_ovlp { 2 } else { 3 };
+        }
+    }
+    for &ci in &kept_idx {
+        let f = a[ci].first;
+        if f >= 0 {
+            a[f as usize].kept = 1;
+        }
+    }
+    // max_chain_extend demotion (default is 1<<30, effectively never).
+    let mut k = 0i32;
+    let mut i = 0usize;
+    while i < a.len() {
+        if a[i].kept == 0 || a[i].kept == 3 {
+            i += 1;
+            continue;
+        }
+        k += 1;
+        i += 1;
+        if k >= opt.max_chain_extend {
+            break;
+        }
+    }
+    while i < a.len() {
+        if a[i].kept < 3 {
+            a[i].kept = 0;
+        }
+        i += 1;
+    }
+    a.retain(|c| c.kept != 0);
+    a
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bwa_index::BntSeq;
+    use std::path::Path;
+
+    fn tiny() -> (FmIndex, BntSeq) {
+        let prefix = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/tiny/tiny.fa");
+        (
+            FmIndex::load(Path::new(prefix)).unwrap(),
+            BntSeq::load(Path::new(prefix)).unwrap(),
+        )
+    }
+
+    #[test]
+    fn single_slice_makes_one_chain() {
+        let (fm, bns) = tiny();
+        let opt = MemOpt::default();
+        let start = 40_000i64;
+        let read: Vec<u8> = (0..150).map(|i| fm.base(start + i)).collect();
+        let chains = build_chains(&fm, &bns, &opt, &read, 0);
+        let chains = mem_chain_flt(&opt, chains);
+        assert!(!chains.is_empty());
+        // A chain whose first seed sits at the origin, covering the read.
+        let c = chains
+            .iter()
+            .find(|c| c.seeds.iter().any(|s| s.rbeg == start))
+            .expect("origin chain");
+        assert_eq!(mem_chain_weight(c), 150);
+        // Seeds within a chain are collinear and non-decreasing in qbeg.
+        for w in c.seeds.windows(2) {
+            assert!(w[1].qbeg >= w[0].qbeg);
+        }
+    }
+
+    #[test]
+    fn two_slices_make_two_chains() {
+        let (fm, bns) = tiny();
+        let opt = MemOpt::default();
+        // Concatenate two distant reference slices -> two separate chains.
+        let mut read: Vec<u8> = (0..80).map(|i| fm.base(10_000 + i)).collect();
+        read.extend((0..80).map(|i| fm.base(120_000 + i)));
+        let chains = build_chains(&fm, &bns, &opt, &read, 0);
+        let chains = mem_chain_flt(&opt, chains);
+        assert!(
+            chains.len() >= 2,
+            "expected >=2 chains, got {}",
+            chains.len()
+        );
+    }
+}
