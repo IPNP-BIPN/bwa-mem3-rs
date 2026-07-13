@@ -4,5 +4,9 @@
 //! Index construction (`build`) and the FM traversal (`fmindex`) arrive in phases 1-2.
 
 pub mod bntseq;
+pub mod build;
+pub mod rand48;
+pub mod sais;
 
 pub use bntseq::{Amb, BntSeq, Contig};
+pub use build::build_index;
