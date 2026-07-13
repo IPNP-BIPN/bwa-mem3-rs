@@ -5,8 +5,10 @@
 
 pub mod bntseq;
 pub mod build;
+pub mod fmindex;
 pub mod rand48;
 pub mod sais;
 
 pub use bntseq::{Amb, BntSeq, Contig};
 pub use build::build_index;
+pub use fmindex::{FmIndex, Smem};
