@@ -11,7 +11,7 @@ use clap::Args;
 use bwa_core::{dna, MemOpt};
 use bwa_index::{BntSeq, FmIndex};
 use bwa_io::{sam, FastqReader, SqRecord};
-use bwa_mem::{align_read, cigar_string, reg2aln};
+use bwa_mem::{align_read_se, cigar_string, mem_approx_mapq_se, reg2aln};
 
 #[derive(Args)]
 pub struct MemArgs {
@@ -58,6 +58,7 @@ pub fn run(args: MemArgs, argv: &[String]) -> anyhow::Result<()> {
     )?;
 
     let mut reader = FastqReader::from_path(&args.reads)?;
+    let mut read_id = 0u64;
     loop {
         let batch = reader.next_batch(k_batch)?;
         if batch.is_empty() {
@@ -65,15 +66,15 @@ pub fn run(args: MemArgs, argv: &[String]) -> anyhow::Result<()> {
         }
         for rec in &batch {
             let codes: Vec<u8> = rec.seq.iter().map(|&b| dna::nt4(b)).collect();
-            let regs = align_read(&fm, &bns, &opt, &codes);
-            let best = regs
-                .iter()
-                .filter(|r| r.score >= opt.t)
-                .max_by_key(|r| r.score);
+            let regs = align_read_se(&fm, &bns, &opt, &codes, read_id);
+            read_id += 1;
+            // After marking, regs[0] is the highest-scoring primary region.
+            let best = regs.first().filter(|r| r.score >= opt.t);
 
             match best {
                 Some(r) => {
                     let aln = reg2aln(&fm, &bns, &opt, codes.len() as i32, &codes, r);
+                    let mapq = mem_approx_mapq_se(&opt, r);
                     let rname = &bns.contigs[aln.rid as usize].name;
                     let flag = if aln.is_rev { 16 } else { 0 };
                     let cigar = cigar_string(&aln.cigar);
@@ -92,7 +93,7 @@ pub fn run(args: MemArgs, argv: &[String]) -> anyhow::Result<()> {
                             flag,
                             rname,
                             pos,
-                            aln.mapq,
+                            mapq,
                             &cigar,
                             &seq,
                             qual.as_deref(),
@@ -105,7 +106,7 @@ pub fn run(args: MemArgs, argv: &[String]) -> anyhow::Result<()> {
                             flag,
                             rname,
                             pos,
-                            aln.mapq,
+                            mapq,
                             &cigar,
                             &rec.seq,
                             rec.qual.as_deref(),
