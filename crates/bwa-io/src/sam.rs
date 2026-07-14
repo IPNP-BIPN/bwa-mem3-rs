@@ -58,6 +58,7 @@ pub fn write_mapped_se<W: Write>(
     cigar: &str,
     seq: &[u8],
     qual: Option<&[u8]>,
+    tags: &str,
 ) -> io::Result<()> {
     write!(
         w,
@@ -68,6 +69,10 @@ pub fn write_mapped_se<W: Write>(
     match qual {
         Some(q) if !q.is_empty() => w.write_all(q)?,
         _ => w.write_all(b"*")?,
+    }
+    if !tags.is_empty() {
+        w.write_all(b"\t")?;
+        w.write_all(tags.as_bytes())?;
     }
     w.write_all(b"\n")?;
     Ok(())

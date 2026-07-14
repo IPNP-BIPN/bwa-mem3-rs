@@ -194,6 +194,127 @@ pub fn ksw_extend2(
     }
 }
 
+const MINUS_INF: i32 = -0x4000_0000;
+
+/// Append `(op, len)` to a CIGAR (op-merged), mirroring bwa's `push_cigar`. Ops: 0=M, 1=I, 2=D.
+fn push_cigar(cigar: &mut Vec<u32>, op: u32, len: u32) {
+    if let Some(last) = cigar.last_mut() {
+        if (*last & 0xf) == op {
+            *last += len << 4;
+            return;
+        }
+    }
+    cigar.push((len << 4) | op);
+}
+
+/// Banded global alignment with traceback, a faithful port of `ksw_global2`. Returns the global
+/// score and the CIGAR (`len<<4 | op`, op 0=M/1=I/2=D).
+#[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
+pub fn ksw_global2(
+    query: &[u8],
+    target: &[u8],
+    m: usize,
+    mat: &[i8],
+    o_del: i32,
+    e_del: i32,
+    o_ins: i32,
+    e_ins: i32,
+    w: i32,
+) -> (i32, Vec<u32>) {
+    let qlen = query.len();
+    let tlen = target.len();
+    let oe_del = o_del + e_del;
+    let oe_ins = o_ins + e_ins;
+    let w = w.max(0) as usize;
+    let n_col = qlen.min(2 * w + 1);
+
+    let mut z = vec![0u8; n_col * tlen];
+    let mut qp = vec![0i8; qlen * m];
+    let mut idx = 0;
+    for k in 0..m {
+        let row = &mat[k * m..k * m + m];
+        for &qb in query {
+            qp[idx] = row[qb as usize];
+            idx += 1;
+        }
+    }
+
+    let mut eh_h = vec![MINUS_INF; qlen + 1];
+    let mut eh_e = vec![MINUS_INF; qlen + 1];
+    eh_h[0] = 0;
+    for j in 1..=qlen.min(w) {
+        eh_h[j] = -(o_ins + e_ins * j as i32);
+    }
+
+    for i in 0..tlen {
+        let mut f = MINUS_INF;
+        let beg = i.saturating_sub(w);
+        let end = (i + w + 1).min(qlen);
+        let mut h1 = if beg == 0 {
+            -(o_del + e_del * (i as i32 + 1))
+        } else {
+            MINUS_INF
+        };
+        let tc = target[i] as usize;
+        let q = &qp[tc * qlen..tc * qlen + qlen];
+        let zoff = i * n_col;
+        for j in beg..end {
+            let mut mm = eh_h[j];
+            let mut e = eh_e[j];
+            eh_h[j] = h1;
+            mm += i32::from(q[j]);
+            let mut d: u8 = u8::from(mm < e);
+            let mut h = if mm >= e { mm } else { e };
+            d = if h >= f { d } else { 2 };
+            h = if h >= f { h } else { f };
+            h1 = h;
+            let t = mm - oe_del;
+            e -= e_del;
+            d |= if e > t { 1 << 2 } else { 0 };
+            e = if e > t { e } else { t };
+            eh_e[j] = e;
+            let t = mm - oe_ins;
+            f -= e_ins;
+            d |= if f > t { 2 << 4 } else { 0 };
+            f = if f > t { f } else { t };
+            z[zoff + (j - beg)] = d;
+        }
+        eh_h[end] = h1;
+        eh_e[end] = MINUS_INF;
+    }
+    let score = eh_h[qlen];
+
+    // Traceback from the last cell.
+    let mut cigar: Vec<u32> = Vec::new();
+    let mut i = tlen as i64 - 1;
+    let mut k = (tlen as i64 - 1 + w as i64 + 1).min(qlen as i64) - 1;
+    let mut which = 0u8;
+    while i >= 0 && k >= 0 {
+        let beg = (i as usize).saturating_sub(w);
+        let d = z[i as usize * n_col + (k as usize - beg)];
+        which = (d >> (which << 1)) & 3;
+        if which == 0 {
+            push_cigar(&mut cigar, 0, 1);
+            i -= 1;
+            k -= 1;
+        } else if which == 1 {
+            push_cigar(&mut cigar, 2, 1);
+            i -= 1;
+        } else {
+            push_cigar(&mut cigar, 1, 1);
+            k -= 1;
+        }
+    }
+    if i >= 0 {
+        push_cigar(&mut cigar, 2, (i + 1) as u32);
+    }
+    if k >= 0 {
+        push_cigar(&mut cigar, 1, (k + 1) as u32);
+    }
+    cigar.reverse();
+    (score, cigar)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,6 +434,30 @@ mod tests {
             let want = ref_extend(&base, &target, 5, &mat, 6, 1, 6, 1, 1);
             assert_eq!(got.score, want, "len={len}");
         }
+    }
+
+    #[test]
+    fn global_exact_match_is_all_m() {
+        let mat = scmat(1, 4);
+        let s: Vec<u8> = vec![0, 1, 2, 3, 0, 1, 2, 3, 0, 1];
+        let (score, cigar) = ksw_global2(&s, &s, 5, &mat, 6, 1, 6, 1, 100);
+        assert_eq!(score, s.len() as i32);
+        assert_eq!(cigar, vec![(s.len() as u32) << 4]); // "<len>M"
+    }
+
+    #[test]
+    fn global_single_deletion() {
+        let mat = scmat(1, 4);
+        // target has one extra base vs query -> a 1bp deletion (D) in the CIGAR.
+        let query: Vec<u8> = vec![0, 1, 2, 3, 0, 1, 2, 3];
+        let mut target = query.clone();
+        target.insert(4, 2); // extra base in the middle of target
+        let (_score, cigar) = ksw_global2(&query, &target, 5, &mat, 6, 1, 6, 1, 100);
+        // total reference length consumed == target length; exactly one D of length 1.
+        let dsum: u32 = cigar.iter().filter(|c| *c & 0xf == 2).map(|c| c >> 4).sum();
+        assert_eq!(dsum, 1);
+        let msum: u32 = cigar.iter().filter(|c| *c & 0xf == 0).map(|c| c >> 4).sum();
+        assert_eq!(msum, query.len() as u32);
     }
 
     #[test]

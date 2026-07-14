@@ -9,6 +9,9 @@ use bwa_core::MemOpt;
 use bwa_extend::ksw_extend2;
 use bwa_index::{BntSeq, FmIndex};
 
+pub mod cigar;
+pub use cigar::{cigar_string, reg2aln, MemAln};
+
 /// Sentinel for uninitialized region bounds (bwa's `H0_`).
 const H0_SENTINEL: i64 = -99;
 /// bwa's `MAX_BAND_TRY`.
