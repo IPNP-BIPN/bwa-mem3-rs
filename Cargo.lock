@@ -90,6 +90,7 @@ dependencies = [
  "bwa-core",
  "bwa-index",
  "bwa-io",
+ "bwa-mem",
  "clap",
 ]
 
@@ -134,6 +135,13 @@ dependencies = [
 [[package]]
 name = "bwa-mem"
 version = "0.0.0"
+dependencies = [
+ "bwa-chain",
+ "bwa-core",
+ "bwa-extend",
+ "bwa-index",
+ "bwa-seed",
+]
 
 [[package]]
 name = "bwa-sam"

@@ -6,3 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+
+[dependencies]
+bwa-core = { workspace = true }
+bwa-index = { workspace = true }
+bwa-seed = { workspace = true }
+bwa-chain = { workspace = true }
+bwa-extend = { workspace = true }

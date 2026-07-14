@@ -1,20 +1,21 @@
 //! `bwa-mem3 mem` subcommand.
 //!
-//! Phase 0: load the reference metadata for the SAM header, stream reads in fixed-size (`-K`)
-//! batches, and emit every read as unmapped. Real alignment lands in phases 3+.
+//! Phase 6 (first milestone): full seed -> chain -> extend pipeline, emitting the best-scoring
+//! region as the primary alignment (correct FLAG/RNAME/POS). MAPQ, exact CIGAR and tags follow.
 
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
 use clap::Args;
 
-use bwa_core::MemOpt;
-use bwa_index::BntSeq;
+use bwa_core::{dna, MemOpt};
+use bwa_index::{BntSeq, FmIndex};
 use bwa_io::{sam, FastqReader, SqRecord};
+use bwa_mem::{align_read, region_to_pos};
 
 #[derive(Args)]
 pub struct MemArgs {
-    /// Number of threads (phase 0 is single-threaded; accepted but ignored).
+    /// Number of threads (phase 6 is single-threaded; accepted but ignored).
     #[arg(short = 't', default_value_t = 1)]
     pub threads: i32,
     /// Process INT input bases per batch (fixes batch boundaries for reproducibility).
@@ -22,7 +23,7 @@ pub struct MemArgs {
     pub k_batch: Option<i64>,
     /// Index prefix: the FASTA path that was indexed.
     pub index_prefix: PathBuf,
-    /// Reads in FASTQ (phase 0: single-end / R1 only).
+    /// Reads in FASTQ (phase 6: single-end / R1 only).
     pub reads: PathBuf,
 }
 
@@ -33,6 +34,7 @@ pub fn run(args: MemArgs, argv: &[String]) -> anyhow::Result<()> {
         .unwrap_or(opt.chunk_size * i64::from(args.threads))
         .max(1) as usize;
 
+    let fm = FmIndex::load(&args.index_prefix)?;
     let bns = BntSeq::load(&args.index_prefix)?;
     let sqs: Vec<SqRecord> = bns
         .contigs
@@ -45,7 +47,6 @@ pub fn run(args: MemArgs, argv: &[String]) -> anyhow::Result<()> {
 
     let stdout = std::io::stdout();
     let mut out = BufWriter::new(stdout.lock());
-
     let cl = argv.join(" ");
     sam::write_header(
         &mut out,
@@ -56,7 +57,6 @@ pub fn run(args: MemArgs, argv: &[String]) -> anyhow::Result<()> {
         &cl,
     )?;
 
-    // Phase 0: read in fixed-size batches, emit every read as unmapped (FLAG 4).
     let mut reader = FastqReader::from_path(&args.reads)?;
     loop {
         let batch = reader.next_batch(k_batch)?;
@@ -64,7 +64,53 @@ pub fn run(args: MemArgs, argv: &[String]) -> anyhow::Result<()> {
             break;
         }
         for rec in &batch {
-            sam::write_unmapped(&mut out, &rec.name, &rec.seq, rec.qual.as_deref())?;
+            let codes: Vec<u8> = rec.seq.iter().map(|&b| dna::nt4(b)).collect();
+            let regs = align_read(&fm, &bns, &opt, &codes);
+            let best = regs
+                .iter()
+                .filter(|r| r.score >= opt.t)
+                .max_by_key(|r| r.score);
+
+            match best {
+                Some(r) => {
+                    let (rid, pos, is_rev) = region_to_pos(&bns, r);
+                    let rname = &bns.contigs[rid as usize].name;
+                    let flag = if is_rev { 16 } else { 0 };
+                    let cigar = format!("{}M", rec.seq.len());
+                    if is_rev {
+                        let seq = dna::revcomp_ascii(&rec.seq);
+                        let qual = rec.qual.as_ref().map(|q| {
+                            let mut v = q.clone();
+                            v.reverse();
+                            v
+                        });
+                        sam::write_mapped_se(
+                            &mut out,
+                            &rec.name,
+                            flag,
+                            rname,
+                            pos,
+                            0,
+                            &cigar,
+                            &seq,
+                            qual.as_deref(),
+                        )?;
+                    } else {
+                        sam::write_mapped_se(
+                            &mut out,
+                            &rec.name,
+                            flag,
+                            rname,
+                            pos,
+                            0,
+                            &cigar,
+                            &rec.seq,
+                            rec.qual.as_deref(),
+                        )?;
+                    }
+                }
+                None => sam::write_unmapped(&mut out, &rec.name, &rec.seq, rec.qual.as_deref())?,
+            }
         }
     }
     out.flush()?;

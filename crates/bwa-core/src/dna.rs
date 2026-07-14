@@ -32,6 +32,21 @@ pub fn comp2(c: u8) -> u8 {
     }
 }
 
+/// Reverse-complement an ASCII nucleotide sequence (A<->T, C<->G, case-normalized to upper;
+/// non-ACGT bytes pass through unchanged). Used for reverse-strand SAM SEQ output.
+pub fn revcomp_ascii(seq: &[u8]) -> Vec<u8> {
+    seq.iter()
+        .rev()
+        .map(|&b| match b {
+            b'A' | b'a' => b'T',
+            b'C' | b'c' => b'G',
+            b'G' | b'g' => b'C',
+            b'T' | b't' => b'A',
+            other => other,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

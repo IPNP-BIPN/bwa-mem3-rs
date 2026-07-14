@@ -15,5 +15,6 @@ path = "src/main.rs"
 bwa-core = { workspace = true }
 bwa-io = { workspace = true }
 bwa-index = { workspace = true }
+bwa-mem = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
