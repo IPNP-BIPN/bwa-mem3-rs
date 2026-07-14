@@ -56,7 +56,8 @@ fn mem_infer_dir(l_pac: i64, b1: i64, b2: i64) -> (usize, i64) {
     // p2: read-2 coordinate projected onto read-1's strand.
     let p2 = if r1 == r2 { b2 } else { (l_pac << 1) - 1 - b2 };
     let dist = if p2 > b1 { p2 - b1 } else { b1 - p2 };
-    let dir = ((r1 == r2) as i64 ^ if p2 > b1 { 0 } else { 3 }) as usize;
+    let base = if r1 == r2 { 0 } else { 1 };
+    let dir = (base ^ if p2 > b1 { 0 } else { 3 }) as usize;
     (dir, dist)
 }
 
@@ -769,4 +770,24 @@ pub fn mem_sam_pe<W: Write>(
     w.write_all(&buf0)?;
     w.write_all(&buf1)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mem_infer_dir;
+
+    #[test]
+    fn infer_dir_orientations() {
+        let l_pac = 1000i64;
+        // Forward read at 100, mate reverse-strand mapping to forward pos 500 (rb = 2L-1-500).
+        let (dir, dist) = mem_infer_dir(l_pac, 100, (l_pac << 1) - 1 - 500);
+        assert_eq!(dir, 1, "forward-then-reverse is FR (1)");
+        assert_eq!(dist, 400);
+        // Both forward: FF (0).
+        let (dir, _) = mem_infer_dir(l_pac, 100, 500);
+        assert_eq!(dir, 0, "both forward is FF (0)");
+        // Both reverse: RR (3).
+        let (dir, _) = mem_infer_dir(l_pac, (l_pac << 1) - 1 - 100, (l_pac << 1) - 1 - 500);
+        assert_eq!(dir, 3, "both reverse is RR (3)");
+    }
 }
