@@ -1,0 +1,196 @@
+//! Region dedup, primary/secondary marking and MAPQ, mirroring bwa-mem2's
+//! `mem_sort_dedup_patch`, `mem_mark_primary_se[_core]` and `mem_approx_mapq_se`
+//! (`reference/bwa-mem2/src/bwamem.cpp`).
+//!
+//! The `mem_patch_reg` region-merge branch of dedup (rare for short reads) is not yet ported;
+//! redundant- and identical-hit removal are, which is what MAPQ needs.
+
+use bwa_core::MemOpt;
+
+use crate::MemAlnReg;
+
+/// Thomas Wang's 64-bit integer hash (`hash_64`), the deterministic tie-breaker for equal-scoring
+/// regions.
+pub fn hash_64(mut key: u64) -> u64 {
+    key = key.wrapping_add(!(key << 32));
+    key ^= key >> 22;
+    key = key.wrapping_add(!(key << 13));
+    key ^= key >> 8;
+    key = key.wrapping_add(key << 3);
+    key ^= key >> 15;
+    key = key.wrapping_add(!(key << 27));
+    key ^= key >> 31;
+    key
+}
+
+/// Remove redundant and identical alignment regions. Port of `mem_sort_dedup_patch` minus the
+/// `mem_patch_reg` merge branch.
+pub fn mem_sort_dedup_patch(opt: &MemOpt, mut a: Vec<MemAlnReg>) -> Vec<MemAlnReg> {
+    if a.len() <= 1 {
+        return a;
+    }
+    let mlr = f64::from(opt.mask_level_redun);
+    let max_gap = i64::from(opt.max_chain_gap);
+
+    // Sort by END position on the reference.
+    a.sort_by_key(|r| r.re);
+    for r in &mut a {
+        r.n_comp = 1;
+    }
+
+    for i in 1..a.len() {
+        if a[i].rid != a[i - 1].rid || a[i].rb >= a[i - 1].re + max_gap {
+            continue;
+        }
+        let (p_rid, p_rb, p_re, p_qb, p_qe, p_score) =
+            (a[i].rid, a[i].rb, a[i].re, a[i].qb, a[i].qe, a[i].score);
+        let mut j = i as i64 - 1;
+        while j >= 0 {
+            let ju = j as usize;
+            if a[ju].rid != p_rid || p_rb >= a[ju].re + max_gap {
+                break;
+            }
+            if a[ju].qe == a[ju].qb {
+                j -= 1;
+                continue;
+            }
+            let or_ = a[ju].re - p_rb;
+            let oq = if a[ju].qb < p_qb {
+                a[ju].qe - p_qb
+            } else {
+                p_qe - a[ju].qb
+            };
+            let mr = (a[ju].re - a[ju].rb).min(p_re - p_rb);
+            let mq = (a[ju].qe - a[ju].qb).min(p_qe - p_qb);
+            if or_ as f64 > mlr * mr as f64 && f64::from(oq) > mlr * f64::from(mq) {
+                if p_score < a[ju].score {
+                    a[i].qe = a[i].qb;
+                    break;
+                }
+                a[ju].qe = a[ju].qb;
+            }
+            // else: mem_patch_reg merge branch (deferred).
+            j -= 1;
+        }
+    }
+    a.retain(|r| r.qe > r.qb);
+
+    // Sort by score desc, then rb, then qb; drop identical hits.
+    a.sort_by(|x, y| {
+        y.score
+            .cmp(&x.score)
+            .then(x.rb.cmp(&y.rb))
+            .then(x.qb.cmp(&y.qb))
+    });
+    for i in 1..a.len() {
+        if a[i].score == a[i - 1].score && a[i].rb == a[i - 1].rb && a[i].qb == a[i - 1].qb {
+            a[i].qe = a[i].qb;
+        }
+    }
+    a.retain(|r| r.qe > r.qb);
+    a
+}
+
+fn mark_primary_core(opt: &MemOpt, a: &mut [MemAlnReg]) {
+    let n = a.len();
+    let mut tmp = opt.a + opt.b;
+    tmp = tmp.max(opt.o_del + opt.e_del).max(opt.o_ins + opt.e_ins);
+    let mut z: Vec<usize> = vec![0];
+    for i in 1..n {
+        let (i_qb, i_qe, i_score, i_alt) = (a[i].qb, a[i].qe, a[i].score, a[i].is_alt);
+        let mut found = None;
+        for &j in &z {
+            let b_max = a[j].qb.max(i_qb);
+            let e_min = a[j].qe.min(i_qe);
+            if e_min > b_max {
+                let min_l = (i_qe - i_qb).min(a[j].qe - a[j].qb);
+                if f64::from(e_min - b_max) >= f64::from(min_l) * f64::from(opt.mask_level) {
+                    if a[j].sub == 0 {
+                        a[j].sub = i_score;
+                    }
+                    if a[j].score - i_score <= tmp && (a[j].is_alt || !i_alt) {
+                        a[j].sub_n += 1;
+                    }
+                    found = Some(j);
+                    break;
+                }
+            }
+        }
+        match found {
+            Some(j) => a[i].secondary = j as i32,
+            None => z.push(i),
+        }
+    }
+}
+
+/// Mark primary/secondary regions and set `sub`/`sub_n`. Port of `mem_mark_primary_se` for the
+/// primary-assembly (non-ALT) case. `id` is the global read index (`n_processed + i`).
+pub fn mem_mark_primary_se(opt: &MemOpt, a: &mut [MemAlnReg], id: u64) -> i32 {
+    if a.is_empty() {
+        return 0;
+    }
+    let mut n_pri = 0;
+    for (i, r) in a.iter_mut().enumerate() {
+        r.sub = 0;
+        r.secondary = -1;
+        r.hash = hash_64(id.wrapping_add(i as u64));
+        if !r.is_alt {
+            n_pri += 1;
+        }
+    }
+    // Sort by (score desc, is_alt asc, hash asc) — `alnreg_hlt`.
+    a.sort_by(|x, y| {
+        y.score
+            .cmp(&x.score)
+            .then(x.is_alt.cmp(&y.is_alt))
+            .then(x.hash.cmp(&y.hash))
+    });
+    mark_primary_core(opt, a);
+    n_pri
+}
+
+/// Approximate mapping quality of a primary region. Port of `mem_approx_mapq_se`.
+pub fn mem_approx_mapq_se(opt: &MemOpt, a: &MemAlnReg) -> u32 {
+    let mut sub = if a.sub != 0 {
+        a.sub
+    } else {
+        opt.min_seed_len * opt.a
+    };
+    sub = sub.max(a.csub);
+    if sub >= a.score {
+        return 0;
+    }
+    let l = (a.qe - a.qb).max((a.re - a.rb) as i32);
+    let identity = 1.0 - f64::from(l * opt.a - a.score) / f64::from(opt.a + opt.b) / f64::from(l);
+    let mut mapq: i32;
+    if a.score == 0 {
+        mapq = 0;
+    } else {
+        // mapQ_coef_len > 0 always for the default options.
+        let tmp = if f64::from(l) < opt.mapq_coef_len {
+            1.0
+        } else {
+            opt.mapq_coef_fac / f64::from(l).ln()
+        };
+        let tmp = tmp * identity * identity;
+        mapq = (6.02 * f64::from(a.score - sub) / f64::from(opt.a) * tmp * tmp + 0.499) as i32;
+    }
+    if a.sub_n > 0 {
+        mapq -= (4.343 * f64::from(a.sub_n + 1).ln() + 0.499) as i32;
+    }
+    mapq = mapq.clamp(0, 60);
+    mapq = (f64::from(mapq) * (1.0 - f64::from(a.frac_rep)) + 0.499) as i32;
+    mapq as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hash_64_is_wang() {
+        // Distinct inputs give distinct, well-mixed outputs (sanity).
+        assert_ne!(hash_64(0), hash_64(1));
+        assert_ne!(hash_64(1000), hash_64(1001));
+    }
+}

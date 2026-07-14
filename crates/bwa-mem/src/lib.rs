@@ -10,7 +10,9 @@ use bwa_extend::ksw_extend2;
 use bwa_index::{BntSeq, FmIndex};
 
 pub mod cigar;
+pub mod primary;
 pub use cigar::{cigar_string, reg2aln, MemAln};
+pub use primary::{mem_approx_mapq_se, mem_mark_primary_se, mem_sort_dedup_patch};
 
 /// Sentinel for uninitialized region bounds (bwa's `H0_`).
 const H0_SENTINEL: i64 = -99;
@@ -28,11 +30,16 @@ pub struct MemAlnReg {
     pub score: i32,
     pub truesc: i32,
     pub sub: i32,
+    pub csub: i32,
+    pub sub_n: i32,
     pub seedcov: i32,
     pub seedlen0: i32,
+    pub secondary: i32,
     pub w: i32,
     pub frac_rep: f32,
     pub is_alt: bool,
+    pub hash: u64,
+    pub n_comp: i32,
 }
 
 fn cal_max_gap(opt: &MemOpt, qlen: i32) -> i32 {
@@ -132,11 +139,16 @@ pub fn mem_chain2aln(
             score: -1,
             truesc: -1,
             sub: 0,
+            csub: 0,
+            sub_n: 0,
             seedcov: 0,
             seedlen0: s.len,
+            secondary: -1,
             w: opt.w,
             frac_rep: chain.frac_rep,
             is_alt: chain.is_alt,
+            hash: 0,
+            n_comp: 1,
         };
 
         // Left extension.
@@ -213,6 +225,21 @@ pub fn align_read(fm: &FmIndex, bns: &BntSeq, opt: &MemOpt, codes: &[u8]) -> Vec
     for c in &chains {
         mem_chain2aln(fm, bns, opt, codes, c, &mut regs);
     }
+    regs
+}
+
+/// Full single-end alignment for one read: extension regions, deduplicated and primary-marked
+/// (`sub`/`sub_n` set for MAPQ). `read_id` is the global read index (for the `hash` tie-break).
+pub fn align_read_se(
+    fm: &FmIndex,
+    bns: &BntSeq,
+    opt: &MemOpt,
+    codes: &[u8],
+    read_id: u64,
+) -> Vec<MemAlnReg> {
+    let regs = align_read(fm, bns, opt, codes);
+    let mut regs = mem_sort_dedup_patch(opt, regs);
+    mem_mark_primary_se(opt, &mut regs, read_id);
     regs
 }
 
