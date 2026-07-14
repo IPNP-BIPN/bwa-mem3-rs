@@ -17,4 +17,4 @@ Cible d'acceptation : index et SAM **octet-identiques** au binaire `bwa-mem2` 2.
 | 9 | `phase9-gpu` | backend Metal du SW (entier -> bit-identique) | identique au scalaire + speedup |
 | 10+ | | gate GIAB `hap.py`/`vcfeval` ; packaging | |
 
-Statut : **phases 0-6 (SE) quasi terminees**. Sortie SAM SE : FLAG/POS/CIGAR 100%, MAPQ 99.5%, ligne entiere 93% byte-identique vs bwa-mem2 (5000 reads chr20). Reste: mem_patch_reg + tie-breaks (XS), puis phase 7 (PE). Prochaine : phase 2 (chargement + traversee FM-index).
+Statut : **phases 0-6 (SE) quasi terminees**. Sortie SAM SE : FLAG/POS/CIGAR 100%, MAPQ 99.5%, ligne entiere 93% byte-identique vs bwa-mem2 (5000 reads chr20). Reste: mem_patch_reg + tie-breaks (XS), puis phase 7 (PE).
