@@ -45,6 +45,34 @@ pub fn write_unmapped<W: Write>(
     Ok(())
 }
 
+/// Write one mapped single-end record. CIGAR/MAPQ are provided by the caller; RNEXT/PNEXT/TLEN
+/// are the SE defaults (`* 0 0`).
+#[allow(clippy::too_many_arguments)]
+pub fn write_mapped_se<W: Write>(
+    w: &mut W,
+    qname: &str,
+    flag: u32,
+    rname: &str,
+    pos: i64,
+    mapq: u32,
+    cigar: &str,
+    seq: &[u8],
+    qual: Option<&[u8]>,
+) -> io::Result<()> {
+    write!(
+        w,
+        "{qname}\t{flag}\t{rname}\t{pos}\t{mapq}\t{cigar}\t*\t0\t0\t"
+    )?;
+    w.write_all(seq)?;
+    w.write_all(b"\t")?;
+    match qual {
+        Some(q) if !q.is_empty() => w.write_all(q)?,
+        _ => w.write_all(b"*")?,
+    }
+    w.write_all(b"\n")?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
