@@ -10,8 +10,10 @@ use bwa_extend::ksw_extend2;
 use bwa_index::{BntSeq, FmIndex};
 
 pub mod cigar;
+pub mod pe;
 pub mod primary;
 pub use cigar::{cigar_string, reg2aln, MemAln};
+pub use pe::{mem_pestat, mem_sam_pe, PeStat};
 pub use primary::{mem_approx_mapq_se, mem_mark_primary_se, mem_sort_dedup_patch};
 
 /// Sentinel for uninitialized region bounds (bwa's `H0_`).
@@ -226,6 +228,14 @@ pub fn align_read(fm: &FmIndex, bns: &BntSeq, opt: &MemOpt, codes: &[u8]) -> Vec
         mem_chain2aln(fm, bns, opt, codes, c, &mut regs);
     }
     regs
+}
+
+/// Align one read and deduplicate its regions (`mem_sort_dedup_patch`), WITHOUT primary marking.
+/// This is the per-read input to paired-end statistics (`mem_pestat`) and pairing, which mark
+/// primaries themselves.
+pub fn align_read_dedup(fm: &FmIndex, bns: &BntSeq, opt: &MemOpt, codes: &[u8]) -> Vec<MemAlnReg> {
+    let regs = align_read(fm, bns, opt, codes);
+    mem_sort_dedup_patch(fm, opt, codes, regs)
 }
 
 /// Full single-end alignment for one read: extension regions, deduplicated and primary-marked
