@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use bwa_core::MemOpt;
 use bwa_index::{BntSeq, FmIndex};
-use bwa_seed::{collect_smems, MemSeed};
+use bwa_seed::{mem_collect_smem, MemSeed};
 
 /// A chain of collinear seeds (bwa-mem2's `mem_chain_t`).
 #[derive(Debug, Clone)]
@@ -110,7 +110,7 @@ pub fn build_chains(
     codes: &[u8],
     seqid: i32,
 ) -> Vec<MemChain> {
-    let mut smems = collect_smems(fm, codes, opt.min_seed_len, 1);
+    let mut smems = mem_collect_smem(fm, codes, opt);
     // Intra-read SMEM order: by (m, n) ascending (bwa's `intv_lt1`).
     smems.sort_by_key(|s| (u64::from(s.m) << 32) | u64::from(s.n));
 

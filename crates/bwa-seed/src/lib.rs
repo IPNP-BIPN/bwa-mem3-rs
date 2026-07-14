@@ -7,6 +7,7 @@
 //! long/repetitive SMEMs and `bwtSeedStrategy`) are layered on later; the end-to-end byte-identity
 //! gate for seeding is the SE SAM concordance in phase 6.
 
+use bwa_core::MemOpt;
 use bwa_index::{FmIndex, Smem};
 
 /// A seed: an exact match between the read and the reference (bwa-mem2's `mem_seed_t`).
@@ -154,6 +155,104 @@ fn smems_from_pos(
         }
     }
     next_x
+}
+
+/// Round-3 forward-only seeding (`bwtSeedStrategyAllPosOneThread`): emit a seed when the interval
+/// first drops below `max_intv` and the seed is at least `min_seed_len` long.
+fn bwt_seed_strategy(
+    fm: &FmIndex,
+    codes: &[u8],
+    max_intv: i64,
+    min_seed_len: i32,
+    out: &mut Vec<Smem>,
+) {
+    let counts = fm.counts();
+    let readlength = codes.len();
+    let mut x = 0usize;
+    while x < readlength {
+        let mut next_x = x + 1;
+        if codes[x] < 4 {
+            let a = codes[x] as usize;
+            let mut smem = Smem {
+                rid: 0,
+                m: x as u32,
+                n: x as u32,
+                k: counts[a],
+                l: counts[3 - a],
+                s: counts[a + 1] - counts[a],
+            };
+            let mut j = x + 1;
+            while j < readlength {
+                next_x = j + 1;
+                let aj = codes[j];
+                if aj >= 4 {
+                    break;
+                }
+                let mut fwd = smem;
+                std::mem::swap(&mut fwd.k, &mut fwd.l);
+                let ext = fm.backward_ext(fwd, 3 - aj as usize);
+                let mut new_smem = ext;
+                std::mem::swap(&mut new_smem.k, &mut new_smem.l);
+                new_smem.n = j as u32;
+                smem = new_smem;
+                if smem.s < max_intv
+                    && (i64::from(smem.n) - i64::from(smem.m) + 1) >= i64::from(min_seed_len)
+                {
+                    if smem.s > 0 {
+                        out.push(smem);
+                    }
+                    break;
+                }
+                j += 1;
+            }
+        }
+        x = next_x;
+    }
+}
+
+/// Collect SMEMs across bwa-mem2's three rounds (`mem_collect_smem`): round-1 all-position SMEMs,
+/// round-2 re-seeding of long non-repetitive SMEMs from their midpoint, and round-3 interval-capped
+/// forward seeding. This is the full seed set feeding chaining.
+pub fn mem_collect_smem(fm: &FmIndex, codes: &[u8], opt: &MemOpt) -> Vec<Smem> {
+    let split_len = (opt.min_seed_len as f32 * opt.split_factor + 0.499) as i32;
+
+    // Round 1.
+    let mut smems = collect_smems(fm, codes, opt.min_seed_len, 1);
+    let num1 = smems.len();
+
+    // Round 2: re-seed each long, non-repetitive round-1 SMEM from its midpoint.
+    let mut scratch: Vec<Smem> = vec![Smem::default(); codes.len() + 2];
+    for idx in 0..num1 {
+        let p = smems[idx];
+        let start = p.m as i32;
+        let end = p.n as i32 + 1;
+        if end - start < split_len || p.s > i64::from(opt.split_width) {
+            continue;
+        }
+        let x = ((end + start) >> 1) as usize;
+        smems_from_pos(
+            fm,
+            codes,
+            x,
+            opt.min_seed_len,
+            p.s + 1,
+            &mut scratch,
+            &mut smems,
+        );
+    }
+
+    // Round 3.
+    if opt.max_mem_intv > 0 {
+        bwt_seed_strategy(
+            fm,
+            codes,
+            opt.max_mem_intv,
+            opt.min_seed_len + 1,
+            &mut smems,
+        );
+    }
+
+    smems
 }
 
 /// Turn one SMEM into reference-coordinate seeds, sampling up to `max_occ` occurrences
