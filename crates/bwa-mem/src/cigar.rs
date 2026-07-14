@@ -39,7 +39,7 @@ fn infer_bw(l1: i32, l2: i32, score: i32, a: i32, q: i32, r: i32) -> i32 {
 
 /// Global-align `query_codes` (the seed-region query slice) to reference `[rb, re)` and compute the
 /// CIGAR, NM and MD. Port of `bwa_gen_cigar2`.
-fn gen_cigar2(
+pub(crate) fn gen_cigar2(
     fm: &FmIndex,
     opt: &MemOpt,
     w_: i32,
