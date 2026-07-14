@@ -6,9 +6,10 @@ use bwa_core::MemOpt;
 use bwa_extend::ksw_global2;
 use bwa_index::{BntSeq, FmIndex};
 
+use crate::primary::mem_approx_mapq_se;
 use crate::MemAlnReg;
 
-/// A finalized single-end alignment (bwa-mem2's `mem_aln_t`, phase-6 subset).
+/// A finalized single-end alignment (bwa-mem2's `mem_aln_t`, phase-6/7 subset).
 #[derive(Debug, Clone)]
 pub struct MemAln {
     pub rid: i32,
@@ -16,13 +17,34 @@ pub struct MemAln {
     pub pos: i64,
     pub is_rev: bool,
     pub mapq: u32,
+    /// SAM FLAG bits set so far (0x4 unmapped, 0x100 secondary). Strand/pair bits are added by the
+    /// SAM writer.
+    pub flag: u32,
     /// CIGAR, `len<<4 | op` (op 0=M/1=I/2=D/3=S).
     pub cigar: Vec<u32>,
     pub nm: i32,
     pub md: String,
     pub score: i32,
-    /// Suboptimal score (`XS:i`), `max(sub, csub)`.
+    /// Suboptimal score (`XS:i`), `max(sub, csub)`. `-1` suppresses the tag (secondary hits).
     pub sub: i32,
+}
+
+impl MemAln {
+    /// An unmapped alignment (`mem_reg2aln` with a null region): `rid=-1`, FLAG 0x4, no CIGAR.
+    pub fn unmapped() -> Self {
+        MemAln {
+            rid: -1,
+            pos: -1,
+            is_rev: false,
+            mapq: 0,
+            flag: 0x4,
+            cigar: Vec::new(),
+            nm: 0,
+            md: String::new(),
+            score: -1,
+            sub: -1,
+        }
+    }
 }
 
 /// Inferred band width, port of `infer_bw`.
@@ -225,7 +247,12 @@ pub fn reg2aln(
         rid,
         pos: pos - offset,
         is_rev,
-        mapq: 0,
+        mapq: if reg.secondary < 0 {
+            mem_approx_mapq_se(opt, reg)
+        } else {
+            0
+        },
+        flag: if reg.secondary >= 0 { 0x100 } else { 0 },
         cigar,
         nm,
         md,

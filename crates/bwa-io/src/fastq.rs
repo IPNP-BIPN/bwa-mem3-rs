@@ -54,6 +54,41 @@ impl FastqReader {
     }
 }
 
+/// Streaming reader over a pair of FASTQ files (R1, R2) advanced in lockstep.
+pub struct PairedFastqReader {
+    r1: FastqReader,
+    r2: FastqReader,
+}
+
+impl PairedFastqReader {
+    /// Open the two mate files.
+    pub fn from_paths<P: AsRef<std::path::Path>>(p1: P, p2: P) -> Result<Self> {
+        Ok(Self {
+            r1: FastqReader::from_path(p1)?,
+            r2: FastqReader::from_path(p2)?,
+        })
+    }
+
+    /// Read a batch of read pairs whose cumulative sequence length (both mates) reaches at least
+    /// `k_batch` bytes, or EOF. Boundaries fall on pair granularity so per-batch statistics
+    /// (`mem_pestat`) are reproducible under a fixed `-K`.
+    pub fn next_batch(&mut self, k_batch: usize) -> Result<Vec<(Record, Record)>> {
+        let mut batch = Vec::new();
+        let mut bases = 0usize;
+        while bases < k_batch {
+            match (self.r1.next_record()?, self.r2.next_record()?) {
+                (Some(a), Some(b)) => {
+                    bases += a.seq.len() + b.seq.len();
+                    batch.push((a, b));
+                }
+                (None, None) => break,
+                _ => return Err(Error::Fastq("paired FASTQ files differ in length".into())),
+            }
+        }
+        Ok(batch)
+    }
+}
+
 /// Derive the SAM QNAME from a FASTQ id line, mirroring bwa: take the field up to the first
 /// whitespace, then trim a trailing `/<digit>` (bwa's `trim_readno`).
 fn qname_from_id(id: &[u8]) -> String {

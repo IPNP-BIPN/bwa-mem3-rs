@@ -6,5 +6,5 @@
 pub mod fastq;
 pub mod sam;
 
-pub use fastq::{FastqReader, Record};
+pub use fastq::{FastqReader, PairedFastqReader, Record};
 pub use sam::{write_header, write_unmapped, SqRecord};
