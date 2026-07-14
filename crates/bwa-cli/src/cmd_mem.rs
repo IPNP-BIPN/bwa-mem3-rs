@@ -1,7 +1,7 @@
 //! `bwa-mem3 mem` subcommand.
 //!
-//! Phase 6 (first milestone): full seed -> chain -> extend pipeline, emitting the best-scoring
-//! region as the primary alignment (correct FLAG/RNAME/POS). MAPQ, exact CIGAR and tags follow.
+//! Phase 6: seed -> chain -> extend -> best region -> `reg2aln` (exact CIGAR + NM/MD). MAPQ and
+//! secondary/XA handling follow.
 
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
@@ -11,7 +11,7 @@ use clap::Args;
 use bwa_core::{dna, MemOpt};
 use bwa_index::{BntSeq, FmIndex};
 use bwa_io::{sam, FastqReader, SqRecord};
-use bwa_mem::{align_read, region_to_pos};
+use bwa_mem::{align_read, cigar_string, reg2aln};
 
 #[derive(Args)]
 pub struct MemArgs {
@@ -73,11 +73,13 @@ pub fn run(args: MemArgs, argv: &[String]) -> anyhow::Result<()> {
 
             match best {
                 Some(r) => {
-                    let (rid, pos, is_rev) = region_to_pos(&bns, r);
-                    let rname = &bns.contigs[rid as usize].name;
-                    let flag = if is_rev { 16 } else { 0 };
-                    let cigar = format!("{}M", rec.seq.len());
-                    if is_rev {
+                    let aln = reg2aln(&fm, &bns, &opt, codes.len() as i32, &codes, r);
+                    let rname = &bns.contigs[aln.rid as usize].name;
+                    let flag = if aln.is_rev { 16 } else { 0 };
+                    let cigar = cigar_string(&aln.cigar);
+                    let tags = format!("NM:i:{}\tMD:Z:{}\tAS:i:{}", aln.nm, aln.md, aln.score);
+                    let pos = aln.pos + 1;
+                    if aln.is_rev {
                         let seq = dna::revcomp_ascii(&rec.seq);
                         let qual = rec.qual.as_ref().map(|q| {
                             let mut v = q.clone();
@@ -90,10 +92,11 @@ pub fn run(args: MemArgs, argv: &[String]) -> anyhow::Result<()> {
                             flag,
                             rname,
                             pos,
-                            0,
+                            aln.mapq,
                             &cigar,
                             &seq,
                             qual.as_deref(),
+                            &tags,
                         )?;
                     } else {
                         sam::write_mapped_se(
@@ -102,10 +105,11 @@ pub fn run(args: MemArgs, argv: &[String]) -> anyhow::Result<()> {
                             flag,
                             rname,
                             pos,
-                            0,
+                            aln.mapq,
                             &cigar,
                             &rec.seq,
                             rec.qual.as_deref(),
+                            &tags,
                         )?;
                     }
                 }
