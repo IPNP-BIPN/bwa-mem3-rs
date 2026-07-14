@@ -78,7 +78,10 @@ pub fn run(args: MemArgs, argv: &[String]) -> anyhow::Result<()> {
                     let rname = &bns.contigs[aln.rid as usize].name;
                     let flag = if aln.is_rev { 16 } else { 0 };
                     let cigar = cigar_string(&aln.cigar);
-                    let tags = format!("NM:i:{}\tMD:Z:{}\tAS:i:{}", aln.nm, aln.md, aln.score);
+                    let tags = format!(
+                        "NM:i:{}\tMD:Z:{}\tAS:i:{}\tXS:i:{}",
+                        aln.nm, aln.md, aln.score, aln.sub
+                    );
                     let pos = aln.pos + 1;
                     if aln.is_rev {
                         let seq = dna::revcomp_ascii(&rec.seq);

@@ -21,6 +21,8 @@ pub struct MemAln {
     pub nm: i32,
     pub md: String,
     pub score: i32,
+    /// Suboptimal score (`XS:i`), `max(sub, csub)`.
+    pub sub: i32,
 }
 
 /// Inferred band width, port of `infer_bw`.
@@ -228,6 +230,7 @@ pub fn reg2aln(
         nm,
         md,
         score: reg.score,
+        sub: reg.sub.max(reg.csub),
     }
 }
 
