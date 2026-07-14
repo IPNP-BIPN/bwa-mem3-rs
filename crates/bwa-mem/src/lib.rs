@@ -238,7 +238,7 @@ pub fn align_read_se(
     read_id: u64,
 ) -> Vec<MemAlnReg> {
     let regs = align_read(fm, bns, opt, codes);
-    let mut regs = mem_sort_dedup_patch(opt, regs);
+    let mut regs = mem_sort_dedup_patch(fm, opt, codes, regs);
     mem_mark_primary_se(opt, &mut regs, read_id);
     regs
 }

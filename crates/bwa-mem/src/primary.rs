@@ -2,12 +2,70 @@
 //! `mem_sort_dedup_patch`, `mem_mark_primary_se[_core]` and `mem_approx_mapq_se`
 //! (`reference/bwa-mem2/src/bwamem.cpp`).
 //!
-//! The `mem_patch_reg` region-merge branch of dedup (rare for short reads) is not yet ported;
-//! redundant- and identical-hit removal are, which is what MAPQ needs.
+//! Includes the `mem_patch_reg` region-merge branch (collinear regions re-aligned into one),
+//! which fires on split/long-indel alignments.
 
 use bwa_core::MemOpt;
+use bwa_index::FmIndex;
 
+use crate::cigar::gen_cigar2;
 use crate::MemAlnReg;
+
+const PATCH_MAX_R_BW: f64 = 0.05;
+const PATCH_MIN_SC_RATIO: f64 = 0.90;
+
+/// Try to merge collinear regions `a` (earlier `rb`) and `b` via a global re-alignment. Returns
+/// `(merged_score, band)` if the merge is good enough. Port of `mem_patch_reg`.
+fn mem_patch_reg(
+    fm: &FmIndex,
+    opt: &MemOpt,
+    codes: &[u8],
+    a: &MemAlnReg,
+    b: &MemAlnReg,
+) -> Option<(i32, i32)> {
+    let l_pac = fm.l_pac();
+    if a.rb < l_pac && b.rb >= l_pac {
+        return None; // different strands
+    }
+    if a.qb >= b.qb || a.qe >= b.qe || a.re >= b.re {
+        return None; // not collinear
+    }
+    let w0 = ((a.re - b.rb) - i64::from(a.qe - b.qb)).abs();
+    let r = ((a.re - b.rb) as f64 / (b.re - a.rb) as f64
+        - f64::from(a.qe - b.qb) / f64::from(b.qe - a.qb))
+    .abs();
+    if a.re < b.rb || a.qe < b.qb {
+        if w0 > i64::from(opt.w << 1) || r >= PATCH_MAX_R_BW {
+            return None;
+        }
+    } else if w0 > i64::from(opt.w << 2) || r >= PATCH_MAX_R_BW * 2.0 {
+        return None;
+    }
+    let mut w = w0 as i32 + a.w + b.w;
+    w = w.min(opt.w << 2);
+
+    let l_query = b.qe - a.qb;
+    let (score, _c, _nm, _md) = gen_cigar2(
+        fm,
+        opt,
+        w,
+        l_query,
+        &codes[a.qb as usize..b.qe as usize],
+        a.rb,
+        b.re,
+    )?;
+
+    let q_s = ((f64::from(b.qe - a.qb) / f64::from((b.qe - b.qb) + (a.qe - a.qb)))
+        * f64::from(b.score + a.score)
+        + 0.499) as i32;
+    let r_s = (((b.re - a.rb) as f64 / ((b.re - b.rb) + (a.re - a.rb)) as f64)
+        * f64::from(b.score + a.score)
+        + 0.499) as i32;
+    if f64::from(score) / f64::from(q_s.max(r_s)) < PATCH_MIN_SC_RATIO {
+        return None;
+    }
+    Some((score, w))
+}
 
 /// Thomas Wang's 64-bit integer hash (`hash_64`), the deterministic tie-breaker for equal-scoring
 /// regions.
@@ -25,7 +83,12 @@ pub fn hash_64(mut key: u64) -> u64 {
 
 /// Remove redundant and identical alignment regions. Port of `mem_sort_dedup_patch` minus the
 /// `mem_patch_reg` merge branch.
-pub fn mem_sort_dedup_patch(opt: &MemOpt, mut a: Vec<MemAlnReg>) -> Vec<MemAlnReg> {
+pub fn mem_sort_dedup_patch(
+    fm: &FmIndex,
+    opt: &MemOpt,
+    codes: &[u8],
+    mut a: Vec<MemAlnReg>,
+) -> Vec<MemAlnReg> {
     if a.len() <= 1 {
         return a;
     }
@@ -42,11 +105,12 @@ pub fn mem_sort_dedup_patch(opt: &MemOpt, mut a: Vec<MemAlnReg>) -> Vec<MemAlnRe
         if a[i].rid != a[i - 1].rid || a[i].rb >= a[i - 1].re + max_gap {
             continue;
         }
-        let (p_rid, p_rb, p_re, p_qb, p_qe, p_score) =
-            (a[i].rid, a[i].rb, a[i].re, a[i].qb, a[i].qe, a[i].score);
         let mut j = i as i64 - 1;
         while j >= 0 {
             let ju = j as usize;
+            // Read p (a[i]) fresh each iteration: a merge below updates it in place.
+            let (p_rid, p_rb, p_re, p_qb, p_qe, p_score) =
+                (a[i].rid, a[i].rb, a[i].re, a[i].qb, a[i].qe, a[i].score);
             if a[ju].rid != p_rid || p_rb >= a[ju].re + max_gap {
                 break;
             }
@@ -68,8 +132,22 @@ pub fn mem_sort_dedup_patch(opt: &MemOpt, mut a: Vec<MemAlnReg>) -> Vec<MemAlnRe
                     break;
                 }
                 a[ju].qe = a[ju].qb;
+            } else if a[ju].rb < p_rb {
+                let q = a[ju].clone();
+                let p = a[i].clone();
+                if let Some((score, w)) = mem_patch_reg(fm, opt, codes, &q, &p) {
+                    a[i].n_comp += a[ju].n_comp + 1;
+                    a[i].seedcov = a[i].seedcov.max(a[ju].seedcov);
+                    a[i].sub = a[i].sub.max(a[ju].sub);
+                    a[i].csub = a[i].csub.max(a[ju].csub);
+                    a[i].qb = a[ju].qb;
+                    a[i].rb = a[ju].rb;
+                    a[i].truesc = score;
+                    a[i].score = score;
+                    a[i].w = w;
+                    a[ju].qe = a[ju].qb;
+                }
             }
-            // else: mem_patch_reg merge branch (deferred).
             j -= 1;
         }
     }
