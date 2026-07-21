@@ -198,5 +198,5 @@ above, was filed from this project.
 ## Licence
 
 MIT, in [LICENSE](LICENSE). This is a derivative work of
-[bwa-mem2](https://github.com/bwa-mem2/bwa-mem2) (Copyright 2019 Intel Corporation, Heng Li), which
+[bwa-mem2](https://github.com/bwa-mem2/bwa-mem2) (Copyright 2019 Intel Corporation, @lh3 Heng Li), which
 is also MIT licensed; its copyright notice is retained in full in that file.
